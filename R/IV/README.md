@@ -14,7 +14,7 @@ Esta carpeta contiene ejercicios de econometría aplicada con Variables Instrume
 - Instrumental Causal Forest
 
 ## Archivos
-- `retornos_educacion.Rmd`: análisis principal y réplica
+- `Retornos_a_la_educ_AE&DS_script`: análisis principal y réplica
 - `Proyecto_de_Ciencia_de_Datos.pdf`: informe final (resultado compilado)
 
 ## Nota
