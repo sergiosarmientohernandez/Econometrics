@@ -1,0 +1,563 @@
+---
+title: "Retornos a la educación: econometría aplicada & Ciencia de datos"
+author: "Sergio Sarmiento y Diego Monroy"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{R}
+rm(list = ls())
+
+knitr::opts_chunk$set(
+echo = TRUE,
+message = FALSE,
+warning = FALSE
+)
+
+# Paquetes necesarios
+#install.packages(c("randomForest", "broom", "rpart", "rpart.plot", "modelsummary", "fixest", "grf"))
+library(tidyverse)
+library(AER)          # ivreg
+library(randomForest) # Random Forest clásico
+library(broom)        # tidy models
+library(sandwich)     # errores robustos
+library(lmtest)       # coeftest, waldtest
+library(rpart)
+library(rpart.plot)
+library(modelsummary)
+library(fixest)
+library(sandwich)
+library(grf)
+library(dplyr)
+library(car)
+#library(wooldridge)
+```
+
+```{R}
+# Data not included in repository
+
+#Alternative data: data('card')
+
+#glimpse(data)
+#summary(data)
+
+```
+
+```{R}
+data <- data %>%
+mutate(
+lwage   = log(wage),   # si wage está en niveles
+expersq = exper^2
+) %>%
+drop_na(lwage, educ, exper, nearc4)
+```
+
+
+Por medio de OLS, estimamos el siguiente modelo: 
+
+$$
+l(wage_i) = \alpha + \beta_{1}educ_i + \beta_{2}exper_i + \beta_{3}exper_i^2 + \epsilon_i
+$$
+```{R, OLS}
+ols_mod <- lm(lwage ~ educ + exper + expersq, data = data)
+
+# Coeficientes con errores estándar robustos (HC1)
+
+coeftest(ols_mod, vcov = vcovHC(ols_mod, type = "HC1"))
+```
+
+Primera Etapa:
+$$
+educ_i = \pi_0 + \pi_{1} nearcollege_i + \pi_{2} exper_i + \pi_{3} exper_i^2 + v_i
+$$
+Segunda Etapa:
+$$
+l(wage_i) = \beta_0 + \beta_{1}\hat{educ_i} + \beta_{2} exper_i + \beta_{3} exper_i^2 + \epsilon_i 
+$$
+```{R, IV con nearc4}
+iv_mod <- ivreg(
+lwage ~ educ + exper + expersq |
+nearc4 + exper + expersq,
+data = data
+)
+
+# Coeficientes con errores estándar robustos (HC1)
+
+coeftest(iv_mod, vcov = vcovHC(iv_mod, type = "HC1"))
+
+```
+
+  **Especificación de Card**
+```{R}
+# Construcción de variables a la manera de Card
+data_card <- data %>%
+  mutate(
+    lwage    = log(wage),
+    exper    = age - 6,               # experiencia potencial
+    expersq  = exper^2,               # experiencia cuadrática
+    black    = ifelse(black == 1, 1, 0),
+    south    = ifelse(south == 1, 1, 0),
+    smsa     = ifelse(smsa == 1, 1, 0)
+  ) %>%
+  drop_na(lwage, educ, exper, expersq, nearc4,
+          fatheduc, motheduc, black, south, smsa)
+
+# ===========================
+# OLS de Card
+# ===========================
+ols_card <- lm(
+  lwage ~ educ + exper + expersq +
+    black + south + smsa +
+    fatheduc + motheduc,
+  data = data_card
+)
+
+coeftest(ols_card, vcov = vcovHC(ols_card, type = "HC1"))
+
+# ===========================
+# IV de Card (nearc4 como instrumento)
+# ===========================
+iv_card <- ivreg(
+  lwage ~ educ + exper + expersq +
+    black + south + smsa +
+    fatheduc + motheduc |
+  
+    nearc4 + exper + expersq +
+    black + south + smsa +
+    fatheduc + motheduc,
+  
+  data = data_card
+)
+
+coeftest(iv_card, vcov = vcovHC(iv_card, type = "HC1"))
+```
+      **Random Forest**
+      
+```{R, Random Forest}
+vars_x <- c(
+"educ", "exper", "expersq", "nearc4",
+"age", "fatheduc", "motheduc", "weight",
+"momdad14", "sinmom14", "step14",
+"reg661", "reg662", "reg663", "reg664", "reg665", "reg666", "reg667", "reg668", "reg669",
+"south66", "black", "south", "smsa", "smsa66",
+"enroll", "kww", "iq", "married", "libcrd14"
+)
+
+data_rf <- data %>%
+select(lwage, all_of(vars_x)) %>%
+drop_na()
+
+```
+
+```{R}
+set.seed(123)
+
+rf_mod <- randomForest(
+lwage ~ .,
+data = data_rf,
+ntree = 500,
+importance = TRUE
+)
+
+print(rf_mod)
+importance(rf_mod)
+varImpPlot(rf_mod)
+
+
+imp_df <- as.data.frame(importance(rf_mod))
+imp_df$variable <- rownames(imp_df)
+
+# Top 10 variables más importantes según %IncMSE
+top10 <- imp_df %>%
+  arrange(desc(`%IncMSE`)) %>%
+  slice_head(n = 10)
+
+# Gráfico bonito
+ggplot(top10, aes(x = reorder(variable, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 10 variables más importantes (Random Forest)",
+    x     = "Variable",
+    y     = "%IncMSE"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+  Excluimos la variable age porque experiencia y expersq son una construcción lineal de la variable age:
+  
+```{R}
+imp <- as.data.frame(importance(rf_mod))
+imp$var <- rownames(imp)
+
+imp_ord <- imp %>%
+arrange(desc(`%IncMSE`))
+
+imp_ord
+
+# Elegir las 10 variables más importantes (excluyendo 'educ')
+
+top_controls <- imp_ord %>%
+  filter(!(var %in% c("educ", "age"))) %>%  # quita age
+  slice_head(n = 10) %>%
+  pull(var)
+
+top_controls
+
+```
+
+```{R}
+vars_tree <- c("educ", top_controls)
+
+form_tree <- as.formula(
+paste("lwage ~", paste(vars_tree, collapse = " + "))
+)
+
+set.seed(123)
+
+tree_mod <- rpart(
+form_tree,
+data   = data_rf,
+method = "anova",
+control = rpart.control(
+cp        = 0.005,
+maxdepth  = 4,
+minbucket = 50
+)
+)
+
+rpart.plot(
+tree_mod,
+type        = 2,
+extra       = 1,
+under       = TRUE,
+tweak       = 1.1,
+faclen      = 0,
+shadow.col  = "gray",
+box.palette = "GnBu"
+)
+```
+
+    **IV con Controles Seleccionados por Random Forest**
+  
+```{R}
+controls_str <- paste(c(top_controls), collapse = " + ")
+
+form_iv_text <- paste0(
+"lwage ~ educ + ", controls_str, " | ",
+"nearc4 + ", controls_str
+)
+
+form_iv <- as.formula(form_iv_text)
+form_iv
+```
+
+Controles dados por RF: age, expersq, exper, kww, weight, south, married, motheduc, smsa, fatheduc. 
+
+*Vector de controles*
+$$
+X_i = (age_i) + (kww_i) + (weight_i) + (south_i) + (married_i), (motheeduc_i) + (faheduc_i) + (smsa_i)
+$$
+*Primera Etapa:*
+$$
+educ_i = \pi_0 + \pi_1(nearCollege_i)+ \pi_2 exper_i + \pi_3 exper_i^2 + \gamma X_i' + v_i
+$$
+
+*Segunda Etapa:* 
+$$
+l(wage_i) = \beta_0 + \beta_1 \hat{educ_i} + \beta_2 exper_i + \beta_3 exper_i^2 + \gamma X_i' + \epsilon_i
+$$
+
+```{R}
+iv_rf_mod <- ivreg(form_iv, data = data_rf)
+
+# Coeficientes con errores estándar robustos a heterocedasticidad (HC1)
+
+coeftest(iv_rf_mod, vcov = vcovHC(iv_rf_mod, type = "HC1"))
+```
+
+
+    **Bootstrap/Bagging del coeficiente IV**
+    
+```{R}
+boot_iv_fun <- function(data, indices) {
+d <- data[indices, ]
+mod_b <- ivreg(form_iv, data = d)
+coef(mod_b)["educ"]
+}
+```
+
+```{R}
+set.seed(123)
+
+B <- 500
+n <- nrow(data_rf)
+
+boot_coefs <- numeric(B)
+
+for (b in seq_len(B)) {
+idx_b <- sample(seq_len(n), size = n, replace = TRUE)
+boot_coefs[b] <- boot_iv_fun(data_rf, idx_b)
+}
+
+mean_boot <- mean(boot_coefs, na.rm = TRUE)
+sd_boot   <- sd(boot_coefs, na.rm = TRUE)
+
+mean_boot
+sd_boot
+```
+
+```{R}
+alpha <- 0.05
+
+ci_lower <- quantile(boot_coefs, probs = alpha/2, na.rm = TRUE)
+ci_upper <- quantile(boot_coefs, probs = 1 - alpha/2, na.rm = TRUE)
+
+c(ci_lower = ci_lower, ci_upper = ci_upper)
+
+# Comparar con IC usando SE robustos (HC1)
+
+coef_iv   <- coef(iv_rf_mod)["educ"]
+se_iv     <- sqrt(vcovHC(iv_rf_mod, type = "HC1")["educ", "educ"])
+
+ci_iv <- c(
+coef_iv - qnorm(1 - alpha/2) * se_iv,
+coef_iv + qnorm(1 - alpha/2) * se_iv
+)
+
+ci_iv
+```
+
+*Baseline mean*
+```{R}
+# Baseline mean de lwage para cada muestra
+baseline_ols      <- mean(data$lwage,    na.rm = TRUE)  # MCO e IV básico usan 'data'
+baseline_iv_basic <- mean(data$lwage,    na.rm = TRUE)
+baseline_iv_rf    <- mean(data_rf$lwage, na.rm = TRUE)  # IV + RF usa 'data_rf'
+```
+
+    **Tablas **
+  
+```{R, Tabla entre modelos}
+## Matrices de var-cov robustas
+vcov_ols_rob       <- vcovHC(ols_mod,    type = "HC1")
+vcov_ols_card_rob  <- vcovHC(ols_card,   type = "HC1")
+vcov_iv_basic_rob  <- vcovHC(iv_mod,     type = "HC1")
+vcov_iv_card_rob   <- vcovHC(iv_card,    type = "HC1")
+vcov_iv_rf_rob     <- vcovHC(iv_rf_mod,  type = "HC1")
+
+## Vectores de SE robustos
+ses_ols_rob       <- sqrt(diag(vcov_ols_rob))
+ses_ols_card_rob  <- sqrt(diag(vcov_ols_card_rob))
+ses_iv_basic_rob  <- sqrt(diag(vcov_iv_basic_rob))
+ses_iv_card_rob   <- sqrt(diag(vcov_iv_card_rob))
+ses_iv_rf_rob     <- sqrt(diag(vcov_iv_rf_rob))
+
+## Modelos en lista
+models_tab2 <- list(
+  "MCO"               = ols_mod,
+  "MCO Card"          = ols_card,
+  "IV básico"       = iv_mod,
+  "IV Card"           = iv_card,
+  "IV Card (controles RF)" = iv_rf_mod
+)
+
+## Lista de SE para statistic_override (mismo orden que models_tab2)
+ses_tab2_rob <- list(
+  ses_ols_rob,
+  ses_ols_card_rob,
+  ses_iv_basic_rob,
+  ses_iv_card_rob,
+  ses_iv_rf_rob
+)
+
+## Baseline means (puedes ajustarlos si quieres usar muestras exactas de cada modelo)
+baseline_mco        <- mean(data$lwage,      na.rm = TRUE)
+baseline_mco_card   <- mean(data_card$lwage, na.rm = TRUE)
+baseline_iv_basic   <- baseline_mco          # misma muestra que MCO básico
+baseline_iv_card    <- baseline_mco_card
+baseline_iv_rf      <- mean(data_rf$lwage,   na.rm = TRUE)
+
+## Variables que SÍ queremos mostrar
+coef_keep <- c("educ", "exper", "expersq")
+
+modelsummary(
+  models_tab2,
+  estimate           = "{estimate}{stars}",
+  statistic          = "({statistic})",
+  statistic_override = ses_tab2_rob,
+  coef_omit          = paste0("^(?!", paste(coef_keep, collapse="|"), ").*$"),
+  coef_omit_regex    = TRUE,
+  stars              = TRUE,
+  gof_omit           = "IC|Log|AIC|BIC|RMSE|F|R2",
+  add_rows           = data.frame(
+    term                 = c("controles",          "baseline mean"),
+    `MCO`                = c("NO", sprintf("%.3f", baseline_mco)),
+    `MCO Card`           = c("SÍ", sprintf("%.3f", baseline_mco_card)),
+    `IV (básico)`        = c("NO", sprintf("%.3f", baseline_iv_basic)),
+    `IV Card`            = c("SÍ", sprintf("%.3f", baseline_iv_card)),
+    `IV (controles RF)`  = c("SÍ (RF)", sprintf("%.3f", baseline_iv_rf))
+  )
+)
+```
+
+
+**====Tabla primera etapa====**
+```{R}
+
+
+## 1. Modelos de primera etapa ------------------------------------------
+
+# (1) Primera etapa IV básico
+fs_basic_full <- lm(educ ~ nearc4 + exper + expersq, data = data)
+
+# (2) Primera etapa IV Card
+#    misma estructura que iv_card:
+#    educ ~ nearc4 + exper + expersq + black + south + smsa + fatheduc + motheduc
+fs_card_full <- lm(
+  educ ~ nearc4 + exper + expersq +
+    black + south + smsa +
+    fatheduc + motheduc,
+  data = data_card
+)
+
+# (3) Primera etapa IV con controles seleccionados por RF
+#    educ ~ nearc4 + top_controls
+form_fs_rf_full <- as.formula(paste("educ ~ nearc4 +", controls_str))
+fs_rf_full <- lm(form_fs_rf_full, data = data_rf)
+
+
+## 2. F PARCIAL de nearc4 en cada modelo --------------------------------
+
+# Modelo básico: restringido sin nearc4
+fs_basic_rest <- lm(educ ~ exper + expersq, data = data)
+anova_basic   <- anova(fs_basic_rest, fs_basic_full)
+F_fs_basic    <- anova_basic[2, "F"]
+
+# Modelo Card: restringido sin nearc4
+fs_card_rest <- lm(
+  educ ~ exper + expersq +
+    black + south + smsa +
+    fatheduc + motheduc,
+  data = data_card
+)
+anova_card <- anova(fs_card_rest, fs_card_full)
+F_fs_card  <- anova_card[2, "F"]
+
+# Modelo RF: restringido sin nearc4
+form_fs_rf_rest <- as.formula(paste("educ ~", controls_str))
+fs_rf_rest <- lm(form_fs_rf_rest, data = data_rf)
+anova_rf   <- anova(fs_rf_rest, fs_rf_full)
+F_fs_rf    <- anova_rf[2, "F"]
+
+
+## 3. Errores estándar robustos (HC1) -----------------------------------
+
+vcov_fs_basic_rob <- vcovHC(fs_basic_full, type = "HC1")
+vcov_fs_card_rob  <- vcovHC(fs_card_full,  type = "HC1")
+vcov_fs_rf_rob    <- vcovHC(fs_rf_full,    type = "HC1")
+
+ses_fs_basic <- sqrt(diag(vcov_fs_basic_rob))
+ses_fs_card  <- sqrt(diag(vcov_fs_card_rob))
+ses_fs_rf    <- sqrt(diag(vcov_fs_rf_rob))
+
+
+## 4. Tabla conjunta de primeras etapas ---------------------------------
+
+models_fs <- list(
+  "Primera etapa IV (básico)" = fs_basic_full,
+  "Primera etapa IV Card"     = fs_card_full,
+  "Primera etapa IV (controles RF)" = fs_rf_full
+)
+
+ses_fs_list <- list(
+  ses_fs_basic,
+  ses_fs_card,
+  ses_fs_rf
+)
+
+modelsummary(
+  models_fs,
+  estimate           = "{estimate}{stars}",
+  statistic          = "({statistic})",
+  statistic_override = ses_fs_list,   # SE robustos
+  stars              = TRUE,
+  gof_omit           = "R2|Adj|AIC|BIC|Log|RMSE",
+  add_rows           = data.frame(
+    term                                = "F parcial nearc4",
+    `Primera etapa IV (básico)`         = sprintf("%.2f", F_fs_basic),
+    `Primera etapa IV Card`             = sprintf("%.2f", F_fs_card),
+    `Primera etapa IV (controles RF)`   = sprintf("%.2f", F_fs_rf)
+  )
+)
+```
+**============================================================================**
+
+    **====Causal Forest con IV para efectos heterogéneos del tratamiento====**
+
+```{R}
+# Matriz de covariables X: usa los mismos controles que en el IV con RF
+X <- data_rf[, c(top_controls)]
+
+# Outcome: log salario
+Y <- data_rf$lwage
+
+# Tratamiento: años de educación
+W <- data_rf$educ
+
+# Instrumento: indicador de universidad cercana
+Z <- data_rf$nearc4
+```
+
+```{R}
+set.seed(123)
+
+iv_forest <- instrumental_forest(
+X = X,   # covariables
+Y = Y,   # outcome
+W = W,   # tratamiento
+Z = Z    # instrumento
+)
+
+cat("IV Forest: \n")
+iv_forest
+
+# Predicciones de efectos causales heterogéneos τ̂_i
+tau_hat <- predict(iv_forest)$predictions
+data_rf$tau_hat <- as.numeric(tau_hat)
+
+# Resumen global del efecto
+mean_tau <- mean(tau_hat)
+sd_tau   <- sd(tau_hat)
+
+cat("Mean Tau t sd Tau: \n")
+mean_tau
+sd_tau
+```
+
+```{R}
+
+# Importancia de variables para la heterogeneidad del efecto
+varimp_tau <- variable_importance(iv_forest)
+data.frame(
+variable   = colnames(X),
+importance = varimp_tau
+) %>%
+arrange(desc(importance))
+
+# Ejemplo: heterogeneidad por terciles de KWW
+data_rf %>%
+mutate(kww_tercil = ntile(kww, 3)) %>%
+group_by(kww_tercil) %>%
+summarise(
+mean_tau = mean(tau_hat, na.rm = TRUE),
+sd_tau   = sd(tau_hat,   na.rm = TRUE),
+n        = n()
+)
+```
+
+
