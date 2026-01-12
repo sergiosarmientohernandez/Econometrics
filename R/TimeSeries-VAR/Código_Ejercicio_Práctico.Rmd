@@ -1,0 +1,307 @@
+---
+title: "Proyecto práctico"
+author: "Sergio Sarmiento"
+date: "2025-06-15"
+output: html_document
+---
+
+
+```{r setup}
+rm(list = ls()) #Clears variable environment
+cat("\014")     #Clears console
+
+library(readxl)
+library(dplyr)
+library(seasonal)
+library(vars)
+library(tseries)
+library(zoo)
+library(ggplot2)
+library(gridExtra)
+library(urca)
+library(forecast)
+library(lpirfs)
+library(tidyr)
+```
+
+```{R}
+setwd("/Users/sergiosarmiento/Desktop/Tarea TPyM")
+```
+
+
+**********************************************************************
+**Parte 1:**
+**********************************************************************
+
+```{R}
+datos <- read_xlsx("/Users/sergiosarmiento/Desktop/Tarea TPyM/VAR.xlsx")
+
+# Filtrar solo las columnas necesarias
+datos <- datos %>% select(Date, IGAE, TIIE_28, ER, INPC, IPI, TREASURY, CPI, COMM)
+
+# Convertir fecha
+datos$fecha <- as.Date(datos$Date)
+
+# Cortar datos a filas 5–95
+datos <- datos %>% slice(5:95)
+```
+
+```{R}
+# Convertir a ts (trimestral)
+IGAE_ts <- ts(datos$IGAE, start = c(2000, 1), frequency = 4)
+INPC_ts <- ts(datos$INPC, start = c(2000, 1), frequency = 4)
+IPI_ts <- ts(datos$IPI, start = c(2000, 1), frequency = 4)
+CPI_ts <- ts(datos$CPI, start = c(2000, 1), frequency = 4)
+
+# Desestacionalizar
+deseag_IGAE <- series(seas(IGAE_ts, x11 = ""), "d11")
+deseag_INPC <- series(seas(INPC_ts, x11 = ""), "d11")
+deseag_IPI  <- series(seas(IPI_ts,  x11 = ""), "d11")
+deseag_CPI  <- series(seas(CPI_ts,  x11 = ""), "d11")
+```
+
+```{R}
+# Asignar series ajustadas
+datos$IGAE <- as.numeric(deseag_IGAE)
+datos$INPC <- as.numeric(deseag_INPC)
+datos$IPI  <- as.numeric(deseag_IPI)
+datos$CPI  <- as.numeric(deseag_CPI)
+```
+
+```{R}
+# Endógenas
+d4log_IGAE <- diff(log(datos$IGAE), lag = 4)
+d4log_TIIE <- diff(log(datos$TIIE_28), lag = 4)
+d4log_ER   <- diff(log(datos$ER), lag = 4)
+d4log_INPC <- diff(log(datos$INPC), lag = 4)
+
+# Exógenas
+d4log_IPI  <- diff(log(datos$IPI), lag = 4)
+d4log_CPI  <- diff(log(datos$CPI), lag = 4)
+d4log_COMM <- diff(log(datos$COMM), lag = 4)
+d4_TREASURY <- diff(datos$TREASURY, lag = 4)
+```
+
+```{R}
+endog_transf <- data.frame(
+  IGAE    = d4log_IGAE,
+  TIIE_28 = d4log_TIIE,
+  ER      = d4log_ER,
+  INPC    = d4log_INPC
+)
+
+exog_transf <- data.frame(
+  IPI      = d4log_IPI,
+  TREASURY = d4_TREASURY,
+  CPI      = d4log_CPI,
+  COMM     = d4log_COMM
+)
+```
+
+
+```{R}
+todo <- cbind(endog_transf, exog_transf)
+todo <- todo[complete.cases(todo), ]
+
+endog_sample <- todo[, c("IGAE", "TIIE_28", "ER", "INPC")]
+exog_sample  <- todo[, c("IPI", "TREASURY", "CPI", "COMM")]
+```
+
+
+```{R}
+criterios_lags <- VARselect(endog_sample, lag.max = 10, type = "const")
+p_elegido <- criterios_lags$selection["AIC(n)"]
+modelo_VAR <- VAR(
+  y      = endog_sample,
+  p      = 4,
+  exogen = as.matrix(exog_sample),
+  type   = "const"
+)
+```
+
+
+```{R}
+residuos_VAR <- residuals(modelo_VAR)
+cholfac <- chol(cov(residuos_VAR))
+struct_shocks <- as.data.frame(residuos_VAR %*% solve(t(cholfac)))
+monetary_shock <- struct_shocks$TIIE_28
+```
+
+```{R}
+fechas_all <- seq(from = as.yearqtr("2000 Q1"), by = 0.25, length.out = 91)
+
+fechas_shock <- tail(fechas_all, length(monetary_shock))
+
+df_shock <- data.frame(
+  Trimestre = fechas_shock,
+  Shock     = as.numeric(monetary_shock)
+)
+
+df_shock <- df_shock[!is.na(df_shock$Trimestre), ]
+
+plot(df_shock$Trimestre, df_shock$Shock, type = "l",
+     main = "Choque Monetario Estructural (TIIE_28)",
+     xlab = "Trimestre", ylab = "Magnitud del choque")
+```
+
+```{R}
+irf_res <- irf(
+  modelo_VAR,
+  impulse   = "TIIE_28",
+  response  = c("IGAE", "TIIE_28", "ER", "INPC"),
+  n.ahead   = 8,
+  boot      = TRUE
+)
+
+plot(
+  irf_res,
+  plot.type = "multiple",
+  main = "IRFs ante un choque en TIIE_28"
+)
+```
+
+
+**********************************************************************
+**Parte 2:**
+**********************************************************************
+
+
+```{R}
+lp_raw <- read_excel("/Users/sergiosarmiento/Desktop/Tarea TPyM/LP.xlsx") 
+
+df_lp <- lp_raw %>%
+  select(
+    general, subyacente, no_sub,
+    sbcimss, comalim, com_noalim,
+    inpp_energ, tc, hol_cp11
+  )
+```
+
+```{R}
+start_year    <- 2005   
+start_quarter <- 2      
+
+to_ts <- function(x) {
+  ts(x, start = c(start_year, start_quarter), frequency = 4)
+}
+
+vars_seasonal <- c(
+  "general","subyacente","no_sub",
+  "sbcimss","comalim","com_noalim",
+  "inpp_energ"
+)
+
+for (v in vars_seasonal) {
+  tmp_ts   <- to_ts(df_lp[[v]])
+  tmp_seas <- seas(tmp_ts, x11 = "")
+  df_lp[[v]] <- as.numeric(final(tmp_seas))
+}
+
+```
+
+
+```{R}
+# Log*100
+df_lp <- df_lp %>%
+  mutate(
+    gen_l100   = 100 * log(general),
+    sub_l100   = 100 * log(subyacente),
+    nosub_l100 = 100 * log(no_sub)
+  )
+
+
+diff_log_vars <- c("sbcimss","comalim","com_noalim","inpp_energ","tc")
+for (v in diff_log_vars) {
+  tmp <- diff(log(df_lp[[v]]))
+  df_lp[[paste0(v, "_d1")]] <- c(NA, tmp)
+}
+
+
+df_lp$hol_cp11_d1 <- c(NA, diff(df_lp$hol_cp11))
+```
+
+
+```{R}
+if (!exists("monetary_shock")) {
+  residuos_VAR   <- residuals(modelo_VAR)
+  cov_res        <- cov(residuos_VAR)
+  cholfac        <- chol(cov_res)
+  struct_shocks  <- as.data.frame(residuos_VAR %*% solve(t(cholfac)))
+  monetary_shock <- struct_shocks[, "TIIE_28"]
+}
+
+
+ms_rec <- monetary_shock[32:87]
+
+
+start_idx <- 1 + max(
+  sapply(df_lp[, c("gen_l100","sub_l100","nosub_l100",
+                   "sbcimss","comalim","com_noalim",
+                   "inpp_energ","tc","hol_cp11_d1")], 
+         function(x) sum(is.na(x)))
+)
+
+
+end_idx <- start_idx + length(ms_rec) - 1
+df_lp_rec <- df_lp[start_idx:end_idx, ]
+```
+
+```{R}
+shock_df <- data.frame(shock = -ms_rec)
+
+endog_gen    <- data.frame(general    = df_lp_rec$gen_l100)
+endog_sub    <- data.frame(subyacente = df_lp_rec$sub_l100)
+endog_nosub  <- data.frame(nosub      = df_lp_rec$nosub_l100)
+
+lags_lp <- 2
+
+contemp_subyacente <- df_lp_rec %>%
+  select(sbcimss_d1, hol_cp11_d1) %>% scale() %>% as.data.frame()
+
+
+contemp_nosub <- df_lp_rec %>%
+  select(comalim_d1, tc_d1) %>% scale() %>% as.data.frame()
+
+ir_gen_simple <- lp_lin_iv(
+  endog_data     = endog_gen,
+  shock          = shock_df,
+  contemp_data   = NULL,
+  lags_endog_lin = lags_lp,
+  confint        = 1.65,
+  use_nw         = TRUE,
+  hor            = 9,
+  trend          = 0,
+  cumul_mult     = TRUE
+)
+
+ir_sub_key <- lp_lin_iv(
+  endog_data     = endog_sub,
+  shock          = shock_df,
+  contemp_data   = contemp_subyacente,
+  lags_endog_lin = lags_lp,
+  confint        = 1.65,
+  use_nw         = TRUE,
+  hor            = 9,
+  trend          = 0,
+  cumul_mult     = TRUE
+)
+
+ir_nosub_key <- lp_lin_iv(
+  endog_data     = endog_nosub,
+  shock          = shock_df,
+  contemp_data   = contemp_nosub,
+  lags_endog_lin = lags_lp,
+  confint        = 1.65,
+  use_nw         = TRUE,
+  hor            = 9,
+  trend          = 0,
+  cumul_mult     = TRUE
+)
+```
+
+
+```{R}
+plot(ir_gen_simple,   main = "IRF: Inflación General")
+plot(ir_sub_key,      main = "IRF: Inflación Subyacente ")
+plot(ir_nosub_key,    main = "IRF: Inflación No Subyacente ")
+```
